@@ -1,8 +1,4 @@
-
-# app.py — EasyVisa Visa Approval Predictor
-# Supports: manual entry, CSV/Excel upload, smart defaults, country encoding
-# Requirements: streamlit, pandas, numpy, joblib, scikit-learn
-
+import os
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -13,7 +9,7 @@ st.set_page_config(page_title="EasyVisa Predictor", page_icon="🛂", layout="ce
 # -----------------------------
 # Core configuration
 # -----------------------------
-EXPECTED_FEATURES = [
+ALL_FEATURES = [
     "wage_yearly", "no_of_employees", "company_age",
     "has_job_experience", "requires_job_training", "full_time_position",
     "education_of_employee_encoded", "continent_encoded", "region_of_employment_encoded"
@@ -34,55 +30,26 @@ FALLBACK_DEFAULTS = {
 # -----------------------------
 # Utilities
 # -----------------------------
-@st.cache_resource
-def load_model_and_meta():
-    try:
-        model = joblib.load("best_model.pkl")
-    except Exception:
-        st.error("❌ 'best_model.pkl' not found. Please place it in the same folder as app.py.")
-        st.stop()
-
-    try:
-        scaler = joblib.load("scaler.pkl")
-    except Exception:
-        st.error("❌ 'scaler.pkl' not found. Please place it in the same folder as app.py.")
-        st.stop()
-
-    return model, scaler
-
 def safe_float(value, default):
     try:
         return float(value) if pd.notna(value) else default
     except:
         return default
 
-def ensure_features(df, defaults):
-    for col in EXPECTED_FEATURES:
+def ensure_features(df, defaults, selected_features):
+    for col in selected_features:
         if col not in df.columns:
-            df[col] = defaults[col]
-    return df[EXPECTED_FEATURES]
+            df[col] = defaults.get(col, 0)
+    return df[selected_features]
 
-def build_template_csv():
-    return pd.DataFrame({
-        "wage_yearly": [60000, 85000],
-        "no_of_employees": [150, 5000],
-        "company_age": [10, 25],
-        "has_job_experience": [1, 0],
-        "requires_job_training": [0, 1],
-        "full_time_position": [1, 1],
-        "education_of_employee_encoded": [2, 3],
-        "continent_encoded": [1, 2],
-        "region_of_employment_encoded": [2, 1]
-    })
-
-def encode_upload(df_raw, defaults):
+def encode_upload(df_raw, defaults, selected_features):
     df = df_raw.copy()
-    for col in EXPECTED_FEATURES:
+    for col in selected_features:
         if col in df.columns:
-            df[col] = df[col].apply(lambda x: safe_float(x, defaults[col]))
+            df[col] = df[col].apply(lambda x: safe_float(x, defaults.get(col, 0)))
         else:
-            df[col] = defaults[col]
-    return ensure_features(df, defaults)
+            df[col] = defaults.get(col, 0)
+    return ensure_features(df, defaults, selected_features)
 
 def predict_with_proba(model, scaler, X):
     X_scaled = scaler.transform(X)
@@ -93,15 +60,49 @@ def predict_with_proba(model, scaler, X):
 # -----------------------------
 # Load model and scaler
 # -----------------------------
+@st.cache_resource
+def load_model_and_meta():
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    models_dir = os.path.abspath(os.path.join(BASE_DIR, "..", "models"))
+
+    model_path = os.path.join(models_dir, "best_model.pkl")
+    scaler_path = os.path.join(models_dir, "scaler.pkl")
+
+    if not os.path.exists(model_path):
+        st.error(f"❌ Model not found at {model_path}. Please place 'best_model.pkl' in the 'models/' folder.")
+        st.stop()
+
+    if not os.path.exists(scaler_path):
+        st.error(f"❌ Scaler not found at {scaler_path}. Please place 'scaler.pkl' in the 'models/' folder.")
+        st.stop()
+
+    model = joblib.load(model_path)
+    scaler = joblib.load(scaler_path)
+    return model, scaler
+
 model, scaler = load_model_and_meta()
 DEFAULTS = FALLBACK_DEFAULTS.copy()
 
+# -----------------------------
+# Feature selection
+# -----------------------------
+st.sidebar.header("Select Features to Use")
+selected_features = st.sidebar.multiselect(
+    "Pick the features to include",
+    options=ALL_FEATURES,
+    default=ALL_FEATURES
+)
+
+if not selected_features:
+    st.warning("Please select at least one feature to continue.")
+    st.stop()
+
+# -----------------------------
+# Streamlit UI
+# -----------------------------
 st.title("🛂 EasyVisa Visa Approval Predictor")
 st.write("Predict visa approval using manual inputs or file upload. Missing fields are auto-filled.")
 
-# -----------------------------
-# Input mode
-# -----------------------------
 mode = st.radio("Choose input method:", ["Manual entry", "Upload file"], horizontal=True)
 
 # -----------------------------
@@ -109,51 +110,30 @@ mode = st.radio("Choose input method:", ["Manual entry", "Upload file"], horizon
 # -----------------------------
 if mode == "Manual entry":
     st.subheader("Enter applicant details")
-    st.caption("Uncheck a field to use default values.")
-
+    row_data = {}
     col1, col2 = st.columns(2)
 
-    with col1:
-        use_wage = st.checkbox("Wage Offered (Yearly)", value=True)
-        wage_val = st.number_input("Wage (USD)", value=DEFAULTS["wage_yearly"]) if use_wage else DEFAULTS["wage_yearly"]
+    for col in selected_features:
+        if col == "wage_yearly":
+            row_data[col] = col1.number_input("Wage Offered (Yearly USD)", value=DEFAULTS[col])
+        elif col == "no_of_employees":
+            row_data[col] = col1.number_input("Number of Employees", value=DEFAULTS[col])
+        elif col == "company_age":
+            row_data[col] = col1.slider("Company Age (Years)", 0, 300, int(DEFAULTS[col]))
+        elif col == "has_job_experience":
+            val = col2.selectbox("Has Job Experience", ["Yes", "No"], index=DEFAULTS[col])
+            row_data[col] = 1 if val == "Yes" else 0
+        elif col == "requires_job_training":
+            val = col2.selectbox("Requires Job Training", ["Yes", "No"], index=DEFAULTS[col])
+            row_data[col] = 1 if val == "Yes" else 0
+        elif col == "full_time_position":
+            val = col2.selectbox("Full-Time Position", ["Yes", "No"], index=DEFAULTS[col])
+            row_data[col] = 1 if val == "Yes" else 0
+        elif col in ["education_of_employee_encoded", "continent_encoded", "region_of_employment_encoded"]:
+            row_data[col] = col2.slider(col.replace("_", " ").title(), 0, 5, DEFAULTS[col])
 
-        use_exp = st.checkbox("Has Job Experience", value=True)
-        exp_val = st.selectbox("Job Experience", ["Yes", "No"]) if use_exp else ("Yes" if DEFAULTS["has_job_experience"] == 1 else "No")
-        exp_encoded = 1 if exp_val == "Yes" else 0
-
-        use_train = st.checkbox("Requires Job Training", value=True)
-        train_val = st.selectbox("Training Required", ["No", "Yes"]) if use_train else ("No" if DEFAULTS["requires_job_training"] == 0 else "Yes")
-        train_encoded = 1 if train_val == "Yes" else 0
-
-    with col2:
-        use_emp = st.checkbox("Number of Employees", value=True)
-        emp_val = st.number_input("Employees", value=DEFAULTS["no_of_employees"]) if use_emp else DEFAULTS["no_of_employees"]
-
-        use_age = st.checkbox("Company Age", value=True)
-        age_val = st.slider("Company Age (years)", 0, 300, int(DEFAULTS["company_age"])) if use_age else DEFAULTS["company_age"]
-
-        use_full = st.checkbox("Full-Time Position", value=True)
-        full_val = st.selectbox("Full-Time", ["Yes", "No"]) if use_full else ("Yes" if DEFAULTS["full_time_position"] == 1 else "No")
-        full_encoded = 1 if full_val == "Yes" else 0
-
-    st.markdown("### Encoded Inputs")
-    edu_encoded = st.slider("Education Level (Encoded)", 0, 5, DEFAULTS["education_of_employee_encoded"])
-    cont_encoded = st.slider("Continent (Encoded)", 0, 5, DEFAULTS["continent_encoded"])
-    region_encoded = st.slider("Region of Employment (Encoded)", 0, 5, DEFAULTS["region_of_employment_encoded"])
-
-    row = pd.DataFrame([{
-        "wage_yearly": float(wage_val),
-        "no_of_employees": float(emp_val),
-        "company_age": float(age_val),
-        "has_job_experience": int(exp_encoded),
-        "requires_job_training": int(train_encoded),
-        "full_time_position": int(full_encoded),
-        "education_of_employee_encoded": int(edu_encoded),
-        "continent_encoded": int(cont_encoded),
-        "region_of_employment_encoded": int(region_encoded)
-    }])
-
-    row = ensure_features(row, DEFAULTS)
+    row = pd.DataFrame([row_data])
+    row = ensure_features(row, DEFAULTS, selected_features)
 
     if st.button("Predict visa outcome"):
         y_pred, proba = predict_with_proba(model, scaler, row)
@@ -171,21 +151,15 @@ if mode == "Manual entry":
 # -----------------------------
 else:
     st.subheader("Upload CSV or Excel")
-    st.write("Include any of the expected columns. Missing fields are auto-filled.")
-
-    template = build_template_csv()
-    csv_data = template.to_csv(index=False).encode("utf-8")
-    st.download_button("📥 Download input template", data=csv_data, file_name="easyvisa_input_template.csv", mime="text/csv")
-
     uploaded = st.file_uploader("Upload file", type=["csv", "xlsx"])
     if uploaded:
         df_raw = pd.read_csv(uploaded) if uploaded.name.lower().endswith(".csv") else pd.read_excel(uploaded)
-
         st.write("Preview of uploaded data:")
         st.dataframe(df_raw.head())
 
-        X = encode_upload(df_raw, DEFAULTS)
-        y_pred, proba = predict_with_proba(model, scaler, X)
+        # Align selected features with uploaded file
+        df_for_model = encode_upload(df_raw, DEFAULTS, selected_features)
+        y_pred, proba = predict_with_proba(model, scaler, df_for_model)
 
         out = df_raw.copy()
         out["Predicted_Certified"] = y_pred.astype(int)
@@ -205,4 +179,6 @@ with st.expander("ℹ️ How this app works"):
     st.markdown("""
 - You can enter data manually or upload a file for bulk predictions.
 - Missing fields are filled with smart defaults based on training data.
-- Encoded values""")
+- You can dynamically select which features to include both in manual entry and file upload.
+- Ensure 'best_model.pkl' and 'scaler.pkl' are in the 'models/' folder.
+""")
